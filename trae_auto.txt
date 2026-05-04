@@ -1,0 +1,268 @@
+RadioDroid 极致简化版修改指南（仅保留收藏播放 + 大屏电视遥控器）
+
+本指南将 xueshi86 魔改版 RadioDroid 简化为一个 纯收藏电台播放器，完全移除在线搜索、本地数据库、分类浏览等复杂功能，仅保留：
+
+· ✅ 从 M3U 文件导入/导出收藏电台
+· ✅ 播放器（大屏界面 + 元数据显示）
+· ✅ 遥控器焦点导航（上下键切换电台，确认键播放/暂停）
+· ✅ 极简的电台列表
+· ✅ 主题/语言/播放等必要设置
+
+目标：像 Transistor 一样轻量，但拥有更适配电视的大屏播放界面和更完善的遥控器支持。
+
+---
+
+📁 删除文件清单（彻底移除不必要功能）
+
+1. 数据库相关（全部删除）
+
+```
+app/src/main/java/net/programmierecke/radiodroid2/database/
+  └── 整个目录（10+ 文件）
+
+app/src/main/java/net/programmierecke/radiodroid2/service/
+  ├── DatabaseUpdateManager.java
+  └── DatabaseUpdateWorker.java
+
+app/src/main/java/net/programmierecke/radiodroid2/ui/
+  ├── DatabaseUpdateProgressDialog.java
+  └── EmptyDatabaseView.java
+
+app/src/main/java/net/programmierecke/radiodroid2/utils/
+  ├── DatabaseEmptyHelper.java
+  └── GetRealLinkAndPlayTask.java   （不需要，收藏电台已有 URL）
+
+app/src/main/res/layout/
+  ├── dialog_database_update_progress.xml
+  ├── fragment_empty_database.xml
+  └── fragment_stations_remote.xml   （改为使用 fragment_stations.xml）
+```
+
+2. 在线搜索/分类/排行榜相关 Fragment（全部删除）
+
+```
+app/src/main/java/net/programmierecke/radiodroid2/station/
+  ├── FragmentCategoriesLocal.java
+  ├── FragmentLocalStations.java
+  ├── FragmentRecentlyChanged.java
+  ├── FragmentSearchLocal.java
+  ├── FragmentTopClick.java
+  ├── FragmentTopVote.java
+  ├── FragmentMultiSearch.java
+  ├── StationsFilter.java          （不需要过滤）
+  ├── StationDiffCallback.java     （不需要 DiffUtil）
+  └── StationPopupMenu.kt          （可选保留，用于收藏列表的弹出菜单）
+
+app/src/main/java/net/programmierecke/radiodroid2/adapters/
+  ├── ItemAdapterCategory.java     （删除）
+  └── ItemAdapterStatistics.java   （删除）
+```
+
+3. 其他在线相关组件
+
+```
+app/src/main/java/net/programmierecke/radiodroid2/
+  ├── FragmentCategories.java      （删除）
+  ├── FragmentServerInfo.java      （删除）
+  ├── FragmentTabs.java            （删除，改为直接显示收藏列表）
+  ├── RadioBrowserServerManager.java （删除，不需要服务器选择）
+  ├── HttpClient.java              （可选，但播放器仍需要网络，保留）
+  └── FallbackStationsManager.kt   （删除）
+
+app/src/main/res/xml/preferences.xml  （简化，移除数据库更新相关条目）
+```
+
+4. Build.gradle 依赖精简
+
+删除以下依赖（不再需要）：
+
+```gradle
+// 删除
+implementation 'androidx.room:room-runtime:2.2.6'
+annotationProcessor 'androidx.room:room-compiler:2.2.6'
+implementation 'androidx.paging:paging-runtime:3.1.1'
+implementation 'androidx.work:work-runtime:2.7.1'
+implementation 'com.google.code.gson:gson:2.9.1'  // 如果收藏用 JSON 则保留，否则删除
+implementation 'com.squareup.okhttp3:okhttp:3.12.13' // 保留，播放器需要
+implementation 'com.google.android.exoplayer:exoplayer-core:2.18.2'
+implementation 'com.google.android.exoplayer:exoplayer-hls:2.18.2'
+```
+
+---
+
+✂️ 精简后的活动流
+
+修改 AndroidManifest.xml，让 ActivityMain 直接加载 FragmentStarred（收藏列表）而非 FragmentTabs。
+
+修改 ActivityMain.java
+
+1. 移除所有与数据库、服务器、Tabs 相关的代码
+
+· 删除 setupStartUpFragment() 中的复杂逻辑
+· 删除 onNavigationItemSelected 中的多处分支（只保留 nav_item_starred 和 nav_item_settings）
+· 删除广播接收器中 DATABASE_UPDATED 相关处理
+
+2. 修改 onCreate 末尾，直接显示收藏列表
+
+```java
+@Override
+protected void onCreate(Bundle savedInstanceState) {
+    // ... 原有初始化（主题、工具栏、播放器等）...
+
+    // 直接显示收藏列表，不再使用 NavigationView 的复杂逻辑
+    if (savedInstanceState == null) {
+        FragmentStarred fragmentStarred = new FragmentStarred();
+        getSupportFragmentManager().beginTransaction()
+            .replace(R.id.containerView, fragmentStarred)
+            .commit();
+    }
+
+    // 如果有必要，隐藏 NavigationView / BottomNavigationView
+    mNavigationView.setVisibility(View.GONE);
+    mBottomNavigationView.setVisibility(View.GONE);
+    // 隐藏 DrawerLayout 的菜单按钮等（可选）
+}
+```
+
+3. 简化选项菜单（onCreateOptionsMenu）
+
+只保留 action_save（导出收藏）、action_load（导入收藏）、action_set_sleep_timer、action_delete（清空收藏）等。
+
+---
+
+🎛️ 修改 FragmentStarred.java（收藏列表）
+
+当前 FragmentStarred 已经实现了从 FavouriteManager 读取列表、支持拖拽排序和滑动删除。我们需要确保：
+
+· 列表项点击时播放电台（调用 Utils.showPlaySelection 或直接播放）
+· 支持遥控器上下键移动焦点，并自动滚动
+· 支持长按弹出菜单（删除、播放等）
+
+添加遥控器焦点管理（参考设计文档中的 FocusManager）
+
+可以在 FragmentStarred 的 onViewCreated 中设置：
+
+```java
+private FocusManager focusManager;
+
+@Override
+public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+    super.onViewCreated(view, savedInstanceState);
+    // 确保 RecyclerView 有焦点
+    rvStations.setFocusable(true);
+    rvStations.setFocusableInTouchMode(true);
+    rvStations.requestFocus();
+
+    focusManager = new FocusManager(rvStations);
+    focusManager.initializeFocus(0);
+}
+```
+
+并在 onResume 中恢复焦点位置。
+
+---
+
+🧩 修改 FavouriteManager.java
+
+保留其 JSON 存储机制（SharedPreferences 序列化）。确保 SaveM3U 和 LoadM3U 方法正常工作（基于 ACTION_CREATE_DOCUMENT 和 ACTION_OPEN_DOCUMENT 的现代文件选择器已支持）。
+
+不需要任何数据库相关调用。删除 updateShortcuts 中可能引用的数据库代码。
+
+---
+
+🖥️ 保留大屏播放器（FragmentPlayerFull）
+
+这是最重要的 UI 组件，完全保留。需确保：
+
+· 从 FragmentStarred 点击电台后，能正确展开 BottomSheet 并显示 FragmentPlayerFull
+· 遥控器上下键在播放器界面应切换电台（需在 FragmentPlayerFull 的 onKey 中调用 PlayerServiceUtil.skipToNext/Previous）
+· 播放器界面的“收藏”按钮应反映当前电台是否在收藏夹中，并可切换
+
+修改 FragmentPlayerFull.onViewCreated 中的按键处理
+
+已经存在以下代码，需确认其正确性：
+
+```java
+view.setOnKeyListener((v, keyCode, event) -> {
+    if (event.getAction() == KeyEvent.ACTION_DOWN) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+                PlayerServiceUtil.skipToPrevious();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                PlayerServiceUtil.skipToNext();
+                return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+            case KeyEvent.KEYCODE_ENTER:
+                // 播放/暂停
+                ...
+        }
+    }
+    return false;
+});
+```
+
+---
+
+🔧 简化 PlayerServiceUtil 和 PlayerService
+
+移除所有对 RadioStationRepository 的引用。播放逻辑仅基于 DataRadioStation 对象（包含 StationUuid, Name, StreamUrl 等）。PlayerService 中原本通过 repository 获取电台的逻辑应改为从 FavouriteManager 或传入的 station 获取。
+
+具体修改：
+
+· 在 PlayerService.playCurrentStation() 中，不再从数据库读取，直接使用当前 currentStation
+· skipToNext/Previous 从 FavouriteManager 获取下一个电台（循环）
+· 删除 MediaSessionCallback 中对 repository 的依赖
+
+---
+
+📝 简化 SettingsFragment
+
+修改 preferences.xml，删除以下条目：
+
+· pref_category_local_database_update 整个分类
+· local_database_status
+· update_local_database
+· check_network_connection
+· export_database
+· import_database
+· radiobrowser_server（服务器选择）
+· warn_no_wifi（可选保留）
+· single_use_tags 等分类相关
+
+保留：
+
+· 主题选择
+· 语言选择
+· 睡眠定时器
+· 播放选项（如外部播放器）
+· 缓冲设置等
+
+在 FragmentSettings.java 中删除所有数据库更新、服务器测试、导入导出（收藏的导入导出保留在收藏列表的菜单中）的处理函数。
+
+---
+
+🧪 测试要点
+
+1. 启动：直接显示收藏列表（若无收藏则显示空状态和导入按钮）
+2. 导入 M3U：从文件选择器导入，列表正确显示
+3. 播放：点击任一电台，大屏播放器展开，声音正常，元数据显示
+4. 遥控器：上下键在列表和播放器中切换电台，确认键播放/暂停，返回键折叠播放器
+5. 导出：将当前收藏导出为 M3U 文件
+6. 删除：滑动或长按删除电台，支持撤销
+7. 排序：拖拽调整顺序（可选，保留）
+8. 设置：主题切换生效，睡眠定时器工作
+
+---
+
+📦 最终 APK 特点
+
+· 无任何数据库更新等待
+· 无需网络搜索功能（纯播放已有收藏）
+· 启动速度快，内存占用低
+· 完美支持 Android TV 遥控器和大屏 UI
+· 可作为家庭影音中心的轻量级网络收音机
+
+---
+
+按照以上指南操作，你将从庞大的 RadioDroid 代码库中提炼出一个纯粹、稳定、专为电视遥控器优化的电台播放器。如果需要更具体的代码修改片段（例如 FocusManager 的实现、FragmentStarred 的焦点集成等），我可以继续提供。
